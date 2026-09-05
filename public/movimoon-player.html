@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MoviMoon Special Player</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+<style>
+body{margin:0;background:#000;color:#fff;font-family:system-ui}
+#loader{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;background:#0a0a0a;z-index:10}
+.spinner{width:40px;height:40px;border:3px solid #333;border-top-color:#00d4aa;border-radius:50%;animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+#video{width:100%;height:100vh;background:#000}
+#controls{position:absolute;bottom:0;left:0;right:0;padding:12px;background:linear-gradient(transparent,rgba(0,0,0,.8));display:flex;gap:8px;flex-wrap:wrap;z-index:5}
+.btn{padding:6px 12px;border-radius:20px;border:1px solid #333;background:#1a1a1a;color:#fff;cursor:pointer;font-size:12px}
+.btn.active{background:#00d4aa;color:#000;border-color:#00d4aa}
+#info{position:absolute;top:10px;left:10px;background:rgba(0,0,0,.7);padding:6px 10px;border-radius:6px;font-size:11px;z-index:5}
+</style>
+</head>
+<body>
+<div id="loader"><div class="spinner"></div><div id="loader-text">Loading streams from Render API...<br>Free instance may take 50s on first load</div></div>
+<div id="info">MoviMoon Special - TMDB Embed API</div>
+<video id="video" controls autoplay playsinline></video>
+<div id="controls"></div>
+
+<script>
+const API_BASE = 'https://tmdb-embed-api-x7j9.onrender.com';
+const params = new URLSearchParams(location.search);
+const tmdbId = params.get('tmdb') || params.get('id') || '550';
+const type = params.get('type') || 'movie';
+const season = params.get('s') || params.get('season') || '1';
+const episode = params.get('e') || params.get('episode') || '1';
+
+async function fetchStreams() {
+  const url = type === 'movie' 
+    ? `${API_BASE}/api/streams/movie/${tmdbId}`
+    : `${API_BASE}/api/streams/tv/${tmdbId}?season=${season}&episode=${episode}`;
+  
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    console.log('API Response:', data);
+    
+    if(!data.streams || data.streams.length === 0) {
+      document.getElementById('loader-text').innerText = 'No streams found! Try another provider.';
+      return;
+    }
+    
+    // Render streams
+    const controls = document.getElementById('controls');
+    data.streams.forEach((stream, idx) => {
+      const btn = document.createElement('button');
+      btn.className = 'btn' + (idx===0 ? ' active' : '');
+      btn.innerText = `${stream.provider} - ${stream.quality}`;
+      btn.onclick = () => {
+        document.querySelectorAll('.btn').forEach(b=>b.classList.remove('active'));
+        btn.classList.add('active');
+        playStream(stream.url, stream.headers);
+      };
+      controls.appendChild(btn);
+    });
+    
+    // Auto play first (prefer 1080p)
+    let best = data.streams.find(s => s.quality && s.quality.includes('1080')) || data.streams[0];
+    playStream(best.url, best.headers);
+    
+  } catch(e) {
+    console.error(e);
+    document.getElementById('loader-text').innerText = 'Error: ' + e.message + '\nRender free instance may be sleeping, refresh after 50s';
+  }
+}
+
+function playStream(url, headers) {
+  const video = document.getElementById('video');
+  const loader = document.getElementById('loader');
+  
+  if(url.includes('.m3u8')) {
+    if(Hls.isSupported()) {
+      if(window.hls) window.hls.destroy();
+      window.hls = new Hls({
+        xhrSetup: function(xhr, u) {
+          if(headers) {
+            for(let k in headers) xhr.setRequestHeader(k, headers[k]);
+          }
+        }
+      });
+      window.hls.loadSource(url);
+      window.hls.attachMedia(video);
+      window.hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        loader.style.display = 'none';
+        video.play();
+      });
+      window.hls.on(Hls.Events.ERROR, (e, data) => {
+        console.error('HLS Error', data);
+        if(data.fatal) {
+          loader.style.display = 'flex';
+          document.getElementById('loader-text').innerText = 'Stream error, trying next...';
+        }
+      });
+    } else if(video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = url;
+      video.addEventListener('loadedmetadata', () => {
+        loader.style.display = 'none';
+        video.play();
+      });
+    }
+  } else {
+    // mp4
+    video.src = url;
+    video.addEventListener('loadedmetadata', () => {
+      loader.style.display = 'none';
+      video.play();
+    }, {once:true});
+  }
+}
+
+fetchStreams();
+</script>
+</body>
+</html>
