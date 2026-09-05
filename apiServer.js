@@ -394,10 +394,15 @@ app.get('/api/streams/:provider/:type/:tmdbId', async (req,res) => {
   }
 });
 
-const PORT = config.port;
+// ============================================
+// 👇 এখানে শুধু এই দুই লাইন চেঞ্জ হয়েছে
+// ============================================
+const PORT = process.env.PORT || config.port || 8787;
 const HOST = process.env.BIND_HOST || '0.0.0.0';
 const server = app.listen(PORT, HOST, () => {
   console.log(`TMDB Embed REST API listening on http://${HOST}:${PORT}`);
+  console.log(`Environment PORT: ${process.env.PORT || '(not set, using fallback)'}`);
+// ============================================
   if (HOST !== 'localhost') {
     console.log(`Local access (if running on your machine): http://localhost:${PORT}`);
   }
