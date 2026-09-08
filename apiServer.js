@@ -174,7 +174,7 @@ app.get('/api/debug/env', (req,res) => { const cookieStats = getCookieStats? get
 app.get('/api/providers/:name', (req,res) => { const p = getProvider(req.params.name); if (!p) return res.status(404).json({ success:false, error:'PROVIDER_NOT_FOUND' }); res.json({ success:true, provider:{ name: p.name, enabled: p.enabled } }); });
 
 // ============================================
-// SHIOPA PROXY - V5 STEALTH + IP BYPASS
+// SHIOPA PROXY - V6 STEALTH FINAL (20s + NextData)
 // ============================================
 app.get('/api/shiopa-proxy', async (req, res) => {
   const { id, type = 'movie', season = '1', episode = '1' } = req.query;
@@ -193,18 +193,14 @@ app.get('/api/shiopa-proxy', async (req, res) => {
     page.setDefaultNavigationTimeout(60000);
 
     let capturedUrl = null;
-    page.on('response', async (response) => {
-      try {
-        const url = response.url();
-        if (url.includes('/watch/t/') &&!capturedUrl) {
-          capturedUrl = url;
-        }
-      } catch {}
+    page.on('response', (response) => {
+      const url = response.url();
+      if (url.includes('/watch/t/') &&!capturedUrl) {
+        capturedUrl = url;
+      }
     });
 
-    const target = type === 'movie'
-  ? `https://shiopa.com/watch/movie/${id}`
-      : `https://shiopa.com/watch/tv/${id}/${season}/${episode}`;
+    const target = type === 'movie'? `https://shiopa.com/watch/movie/${id}` : `https://shiopa.com/watch/tv/${id}/${season}/${episode}`;
 
     await page.goto(target, { waitUntil: 'networkidle2', timeout: 60000 });
     await page.evaluate(() => window.scrollBy(0, 500));
@@ -217,11 +213,11 @@ app.get('/api/shiopa-proxy', async (req, res) => {
 
       const found = await page.evaluate(() => {
         const html = document.documentElement.innerHTML;
-        const m = html.match(/\/watch\/t\/[A-Za-z0-9_\-]+\/[^\s"'\\]+/);
+        let m = html.match(/\/watch\/t\/[A-Za-z0-9_\-]+\/[^\s"'\\]+/);
         if (m) return m[0];
         const nextData = document.getElementById('__NEXT_DATA__');
         if (nextData) {
-          const m2 = nextData.innerHTML.match(/\/watch\/t\/[A-Za-z0-9_\-]+\/[^\s"'\\]+/);
+          let m2 = nextData.innerHTML.match(/\/watch\/t\/[A-Za-z0-9_\-]+\/[^\s"'\\]+/);
           if (m2) return m2[0];
         }
         return null;
@@ -287,4 +283,24 @@ app.get('/api/streams/:provider/:type/:tmdbId', async (req,res) => {
   if (!prov.enabled) return res.status(503).json({ success:false, error:'PROVIDER_DISABLED' });
   try {
     metrics.streamRequests++;
-    metrics.providerCalls[prov.name] = (metrics.providerCalls[prov.name]||
+    metrics.providerCalls[prov.name] = (metrics.providerCalls[prov.name]||0)+1;
+    const tmdbType = type === 'movie'? 'movie' : 'tv';
+    const imdbId = await resolveImdbId(tmdbType, tmdbId); if (imdbId) metrics.tmdbToImdbLookups++;
+    let streams = await prov.fetch({ tmdbId, type, season, episode, imdbId, filters:{} });
+    streams = applyFilters(streams, prov.name, config.minQualities, config.excludeCodecs);
+    metrics.streamsReturned += streams.length;
+    if (config.enableProxy) {
+      const serverUrl = `${req.protocol}://${req.get('host')}`;
+      streams = processStreamsForProxy(streams, serverUrl);
+      streams = streams.map(s => { if (s && typeof s === 'object') { const { headers,...rest } = s; return rest; } return s; });
+    }
+    res.json({ success:true, provider: prov.name, tmdbId, imdbId, count: streams.length, streams });
+  } catch (e) { res.status(500).json({ success:false, error:'INTERNAL_ERROR', message:e.message }); }
+});
+
+const PORT = process.env.PORT || config.port || 8787;
+const HOST = process.env.BIND_HOST || '0.0.0.0';
+const server = app.listen(PORT, HOST, () => {
+  console.log(`TMDB Embed REST API listening on http://${HOST}:${PORT} + Shiopa Proxy Ready (Puppeteer V6 Stealth)`);
+});
+server.on('error', (err)=>{ console.error('[diagnostic] server error', err); });
