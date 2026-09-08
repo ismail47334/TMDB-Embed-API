@@ -9,7 +9,9 @@ const { listProviders, getProvider, getCookieStats } = require('./providers/regi
 const { createProxyRoutes, processStreamsForProxy } = require('./proxy/proxyServer');
 const { resolveImdbId } = require('./utils/tmdb');
 const { applyFilters } = require('./utils/streamFilters');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+puppeteer.use(StealthPlugin());
 
 const app = express();
 app.set('trust proxy', 1);
@@ -172,7 +174,7 @@ app.get('/api/debug/env', (req,res) => { const cookieStats = getCookieStats? get
 app.get('/api/providers/:name', (req,res) => { const p = getProvider(req.params.name); if (!p) return res.status(404).json({ success:false, error:'PROVIDER_NOT_FOUND' }); res.json({ success:true, provider:{ name: p.name, enabled: p.enabled } }); });
 
 // ============================================
-// SHIOPA PROXY - V3 FINAL FIX (15s + 3 Methods)
+// SHIOPA PROXY - V5 STEALTH + IP BYPASS
 // ============================================
 app.get('/api/shiopa-proxy', async (req, res) => {
   const { id, type = 'movie', season = '1', episode = '1' } = req.query;
@@ -182,43 +184,51 @@ app.get('/api/shiopa-proxy', async (req, res) => {
   try {
     browser = await puppeteer.launch({
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--single-process', '--no-zygote']
+      args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--single-process','--no-zygote','--disable-blink-features=AutomationControlled']
     });
 
     const page = await browser.newPage();
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36');
+    await page.setViewport({ width: 1920, height: 1080 });
     page.setDefaultNavigationTimeout(60000);
 
     let capturedUrl = null;
-    // Intercept all responses to capture /watch/t/ url
     page.on('response', async (response) => {
       try {
         const url = response.url();
-        if (url.includes('/watch/t/')) {
+        if (url.includes('/watch/t/') &&!capturedUrl) {
           capturedUrl = url;
         }
       } catch {}
     });
 
     const target = type === 'movie'
-   ? `https://shiopa.com/watch/movie/${id}`
+  ? `https://shiopa.com/watch/movie/${id}`
       : `https://shiopa.com/watch/tv/${id}/${season}/${episode}`;
 
-    await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await page.goto(target, { waitUntil: 'networkidle2', timeout: 60000 });
+    await page.evaluate(() => window.scrollBy(0, 500));
 
-    // Wait up to 15 seconds for token generation
     const start = Date.now();
-    while (Date.now() - start < 15000) {
+    while (Date.now() - start < 20000) {
       if (capturedUrl) break;
-      let url = page.url();
-      if (url.includes('/watch/t/')) {
-        capturedUrl = url;
-        break;
-      }
-      const html = await page.content();
-      const m = html.match(/\/watch\/t\/[A-Za-z0-9_\-]+\/[^\s"'\\]+/);
-      if (m) {
-        capturedUrl = 'https://shiopa.com' + m[0];
+      const url = page.url();
+      if (url.includes('/watch/t/')) { capturedUrl = url; break; }
+
+      const found = await page.evaluate(() => {
+        const html = document.documentElement.innerHTML;
+        const m = html.match(/\/watch\/t\/[A-Za-z0-9_\-]+\/[^\s"'\\]+/);
+        if (m) return m[0];
+        const nextData = document.getElementById('__NEXT_DATA__');
+        if (nextData) {
+          const m2 = nextData.innerHTML.match(/\/watch\/t\/[A-Za-z0-9_\-]+\/[^\s"'\\]+/);
+          if (m2) return m2[0];
+        }
+        return null;
+      });
+
+      if (found) {
+        capturedUrl = found.startsWith('http')? found : 'https://shiopa.com' + found;
         break;
       }
       await new Promise(r => setTimeout(r, 1000));
@@ -277,24 +287,4 @@ app.get('/api/streams/:provider/:type/:tmdbId', async (req,res) => {
   if (!prov.enabled) return res.status(503).json({ success:false, error:'PROVIDER_DISABLED' });
   try {
     metrics.streamRequests++;
-    metrics.providerCalls[prov.name] = (metrics.providerCalls[prov.name]||0)+1;
-    const tmdbType = type === 'movie'? 'movie' : 'tv';
-    const imdbId = await resolveImdbId(tmdbType, tmdbId); if (imdbId) metrics.tmdbToImdbLookups++;
-    let streams = await prov.fetch({ tmdbId, type, season, episode, imdbId, filters:{} });
-    streams = applyFilters(streams, prov.name, config.minQualities, config.excludeCodecs);
-    metrics.streamsReturned += streams.length;
-    if (config.enableProxy) {
-      const serverUrl = `${req.protocol}://${req.get('host')}`;
-      streams = processStreamsForProxy(streams, serverUrl);
-      streams = streams.map(s => { if (s && typeof s === 'object') { const { headers,...rest } = s; return rest; } return s; });
-    }
-    res.json({ success:true, provider: prov.name, tmdbId, imdbId, count: streams.length, streams });
-  } catch (e) { res.status(500).json({ success:false, error:'INTERNAL_ERROR', message:e.message }); }
-});
-
-const PORT = process.env.PORT || config.port || 8787;
-const HOST = process.env.BIND_HOST || '0.0.0.0';
-const server = app.listen(PORT, HOST, () => {
-  console.log(`TMDB Embed REST API listening on http://${HOST}:${PORT} + Shiopa Proxy Ready (Puppeteer V3)`);
-});
-server.on('error', (err)=>{ console.error('[diagnostic] server error', err); });
+    metrics.providerCalls[prov.name] = (metrics.providerCalls[prov.name]||
