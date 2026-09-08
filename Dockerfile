@@ -3,22 +3,19 @@ FROM node:22-slim AS build
 ARG VERSION=dev
 WORKDIR /app
 
-# Install build deps for puppeteer
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libxcomposite1 \
-    libxdamage1 libxrandr2 libgbm1 libxss1 libasound2 libatk1.0-0 \
-    libxshmfence1 libcups2 libxfixes3 libxext6 libx11-6 ca-certificates \
-    wget \
+    ca-certificates fonts-liberation libasound2 libatk-bridge2.0-0 libatk1.0-0 \
+    libc6 libcairo2 libcups2 libdbus-1-3 libexpat1 libfontconfig1 libgbm1 \
+    libgcc1 libglib2.0-0 libgtk-3-0 libnspr4 libnss3 libpango-1.0-0 \
+    libpangocairo-1.0-0 libstdc++6 libx11-6 libx11-xcb1 libxcb1 libxcomposite1 \
+    libxcursor1 libxdamage1 libxext6 libxfixes3 libxi6 libxrandr2 libxrender1 \
+    libxss1 libxtst6 lsb-release wget xdg-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Install dependencies
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev 2>/dev/null || npm install --omit=dev
-
-# Install Chrome for Puppeteer
 RUN npx puppeteer browsers install chrome
 
-# Copy source code
 COPY apiServer.js ./
 COPY providers ./providers
 COPY proxy ./proxy
@@ -31,24 +28,22 @@ FROM node:22-slim AS runtime
 ARG VERSION=dev
 WORKDIR /app
 
-# Environment variables
 ENV NODE_ENV=production \
     BIND_HOST=0.0.0.0 \
     APP_VERSION=${VERSION} \
     PUPPETEER_CACHE_DIR=/home/app/.cache/puppeteer
 
-# Install runtime deps for chrome
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libxcomposite1 \
-    libxdamage1 libxrandr2 libgbm1 libxss1 libasound2 libatk1.0-0 \
-    libxshmfence1 libcups2 libxfixes3 libxext6 libx11-6 ca-certificates \
-    wget \
+    ca-certificates fonts-liberation libasound2 libatk-bridge2.0-0 libatk1.0-0 \
+    libc6 libcairo2 libcups2 libdbus-1-3 libexpat1 libfontconfig1 libgbm1 \
+    libgcc1 libglib2.0-0 libgtk-3-0 libnspr4 libnss3 libpango-1.0-0 \
+    libpangocairo-1.0-0 libstdc++6 libx11-6 libx11-xcb1 libxcb1 libxcomposite1 \
+    libxcursor1 libxdamage1 libxext6 libxfixes3 libxi6 libxrandr2 libxrender1 \
+    libxss1 libxtst6 lsb-release wget xdg-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
 RUN groupadd -r app && useradd -r -g app -m app && mkdir -p /home/app/.cache/puppeteer && chown -R app:app /home/app
 
-# Copy built artifacts + chrome cache
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /root/.cache/puppeteer /home/app/.cache/puppeteer
 COPY --from=build /app/apiServer.js ./
@@ -60,15 +55,8 @@ COPY --from=build /app/package.json ./
 COPY --from=build /app/README.md ./
 
 EXPOSE 8787
-
 RUN chown -R app:app /app
 USER app
-
-LABEL org.opencontainers.image.title="TMDB Embed API" \
-    org.opencontainers.image.description="Streaming metadata + source aggregation API" \
-    org.opencontainers.image.version="${VERSION}" \
-    org.opencontainers.image.source="https://github.com/Inside4ndroid/TMDB-Embed-API" \
-    org.opencontainers.image.licenses="MIT"
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
     CMD wget -qO- http://localhost:${PORT}/api/health || exit 1
