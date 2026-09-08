@@ -9,8 +9,7 @@ const { listProviders, getProvider, getCookieStats } = require('./providers/regi
 const { createProxyRoutes, processStreamsForProxy } = require('./proxy/proxyServer');
 const { resolveImdbId } = require('./utils/tmdb');
 const { applyFilters } = require('./utils/streamFilters');
-const puppeteer = require('puppeteer-core');
-const chromium = require('@sparticuz/chromium');
+const puppeteer = require('puppeteer');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -173,7 +172,7 @@ app.get('/api/debug/env', (req,res) => { const cookieStats = getCookieStats? get
 app.get('/api/providers/:name', (req,res) => { const p = getProvider(req.params.name); if (!p) return res.status(404).json({ success:false, error:'PROVIDER_NOT_FOUND' }); res.json({ success:true, provider:{ name: p.name, enabled: p.enabled } }); });
 
 // ============================================
-// SHIOPA PROXY - PUPPETEER FINAL VERSION
+// SHIOPA PROXY - FIXED FOR RENDER (Full Puppeteer)
 // ============================================
 app.get('/api/shiopa-proxy', async (req, res) => {
   const { id, type = 'movie', season = '1', episode = '1' } = req.query;
@@ -182,25 +181,20 @@ app.get('/api/shiopa-proxy', async (req, res) => {
   let browser = null;
   try {
     browser = await puppeteer.launch({
-      args: chromium.args,
-      defaultViewport: chromium.defaultViewport,
-      executablePath: await chromium.executablePath(),
-      headless: chromium.headless,
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--single-process']
     });
 
     const page = await browser.newPage();
     const target = type === 'movie'
-     ? `https://shiopa.com/watch/movie/${id}`
+    ? `https://shiopa.com/watch/movie/${id}`
       : `https://shiopa.com/watch/tv/${id}/${season}/${episode}`;
 
-    await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 30000 });
-
-    // Wait for token generation - Shiopa takes 3-5 sec
-    await new Promise(r => setTimeout(r, 7000));
+    await page.goto(target, { waitUntil: 'networkidle2', timeout: 30000 });
+    await new Promise(r => setTimeout(r, 8000));
 
     let finalUrl = page.url();
 
-    // If still not /watch/t/, extract from HTML
     if (!finalUrl.includes('/watch/t/')) {
       const html = await page.content();
       const m = html.match(/\/watch\/t\/[A-Za-z0-9_\-]+\/[^\s"'\\]+/);
@@ -216,7 +210,7 @@ app.get('/api/shiopa-proxy', async (req, res) => {
     }
 
   } catch (e) {
-    if (browser) await browser.close();
+    if (browser) try { await browser.close(); } catch {}
     console.error('[shiopa-proxy] error', e.message);
     return res.status(500).json({ error: e.message });
   }
@@ -278,6 +272,6 @@ app.get('/api/streams/:provider/:type/:tmdbId', async (req,res) => {
 const PORT = process.env.PORT || config.port || 8787;
 const HOST = process.env.BIND_HOST || '0.0.0.0';
 const server = app.listen(PORT, HOST, () => {
-  console.log(`TMDB Embed REST API listening on http://${HOST}:${PORT} + Shiopa Proxy Ready`);
+  console.log(`TMDB Embed REST API listening on http://${HOST}:${PORT} + Shiopa Proxy Ready (Puppeteer)`);
 });
 server.on('error', (err)=>{ console.error('[diagnostic] server error', err); });
