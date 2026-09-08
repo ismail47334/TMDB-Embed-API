@@ -9,11 +9,12 @@ const { listProviders, getProvider, getCookieStats } = require('./providers/regi
 const { createProxyRoutes, processStreamsForProxy } = require('./proxy/proxyServer');
 const { resolveImdbId } = require('./utils/tmdb');
 const { applyFilters } = require('./utils/streamFilters');
+const puppeteer = require('puppeteer-core');
+const chromium = require('@sparticuz/chromium');
 
 const app = express();
 app.set('trust proxy', 1);
 
-// Conditionally mount proxy routes early so downstream handlers can use them
 if (config.enableProxy) {
   console.log('[startup] enableProxy flag active: mounting proxy routes');
   createProxyRoutes(app);
@@ -21,16 +22,14 @@ if (config.enableProxy) {
   console.log('[startup] enableProxy flag disabled: proxy routes not mounted');
 }
 
-// --- Simple In-Memory Rate Limiting for /auth/login ---
-const loginAttempts = new Map(); // key: ip, value: { count, first, last, lockedUntil }
-const MAX_ATTEMPTS_WINDOW = 5; // attempts allowed
-const WINDOW_MS = 10 * 60 * 1000; // 10 minutes window
-const BASE_LOCK_MS = 5 * 60 * 1000; // 5 minutes base lock
+const loginAttempts = new Map();
+const MAX_ATTEMPTS_WINDOW = 5;
+const WINDOW_MS = 10 * 60 * 1000;
+const BASE_LOCK_MS = 5 * 60 * 1000;
 
 function getClientIp(req){
   return (req.headers['x-forwarded-for'] || req.connection.remoteAddress || '').split(',')[0].trim();
 }
-
 function recordLoginFailure(ip){
   const now = Date.now();
   let entry = loginAttempts.get(ip);
@@ -53,7 +52,6 @@ function recordLoginFailure(ip){
   }
   return entry;
 }
-
 function canAttempt(ip){
   const entry = loginAttempts.get(ip);
   if (!entry) return { allowed:true };
@@ -67,22 +65,18 @@ function canAttempt(ip){
   }
   return { allowed:true };
 }
-
-function recordLoginSuccess(ip){
-  loginAttempts.delete(ip);
-}
+function recordLoginSuccess(ip){ loginAttempts.delete(ip); }
 
 const realProcessExit = process.exit.bind(process);
 let allowControlledExit = false;
 process.exit = function(code){
   if (allowControlledExit) return realProcessExit(code);
-  console.warn('[diagnostic] Intercepted process.exit with code', code, new Error('exit trace').stack);
+  console.warn('[diagnostic] Intercepted process.exit with code', code);
 };
 setImmediate(()=>console.log('[diagnostic] post-start setImmediate fired'));
 app.use(cors());
 app.use(express.json());
 
-// --- Auth Routes ---
 app.post('/auth/login', (req,res) => {
   const { username, password } = req.body || {};
   const ip = getClientIp(req);
@@ -106,18 +100,15 @@ app.post('/auth/login', (req,res) => {
   res.setHeader('Set-Cookie', `session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${12*60*60}`);
   res.json({ success:true, username });
 });
-
 app.post('/auth/logout', (req,res) => {
   res.setHeader('Set-Cookie', 'session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0');
   res.json({ success:true });
 });
-
 app.get('/auth/session', (req,res) => {
   const sess = getSession(req);
   if (!sess) return res.json({ authenticated:false });
   res.json({ authenticated:true, username: sess.u });
 });
-
 app.post('/auth/change-password', requireAuth, (req,res) => {
   const { oldPassword, newPassword } = req.body || {};
   if (!oldPassword ||!newPassword) return res.status(400).json({ success:false, error:'MISSING_FIELDS' });
@@ -127,8 +118,7 @@ app.post('/auth/change-password', requireAuth, (req,res) => {
   if (!updatePassword(sess.u, newPassword)) return res.status(500).json({ success:false, error:'UPDATE_FAILED' });
   res.json({ success:true, message:'PASSWORD_UPDATED' });
 });
-
-app.get('/config.html', (req,res,next) => {
+app.get('/config.html', (req,res) => {
   const sess = getSession(req);
   if (!sess) return res.redirect(302, '/');
   res.setHeader('Cache-Control','no-store, must-revalidate');
@@ -136,39 +126,21 @@ app.get('/config.html', (req,res,next) => {
   res.setHeader('Expires','0');
   res.sendFile(path.join(process.cwd(),'public','config.html'));
 });
-
 app.get('/', (req,res) => {
   res.setHeader('Cache-Control','no-store, must-revalidate');
   res.setHeader('Pragma','no-cache');
   res.setHeader('Expires','0');
   res.sendFile(path.join(process.cwd(),'public','index.html'));
 });
-
 process.on('beforeExit', (code) => { console.log('[diagnostic] beforeExit code=', code); });
 process.on('exit', (code) => { console.log('[diagnostic] exit code=', code); });
 process.on('uncaughtException', (err) => { console.error('[diagnostic] uncaughtException', err); });
 process.on('unhandledRejection', (reason) => { console.error('[diagnostic] unhandledRejection', reason); });
-
 let hbCount = 0;
-setInterval(()=>{
-  hbCount++;
-  if (hbCount % 6 === 0) { console.log('[diagnostic] heartbeat 60s elapsed, process alive'); }
-}, 10_000).unref();
-
-const metrics = {
-  startTime: Date.now(),
-  requestsTotal: 0,
-  streamRequests: 0,
-  providerCalls: {},
-  lastRequestAt: null,
-  lastError: null,
-  streamsReturned: 0,
-  tmdbToImdbLookups: 0
-};
-
+setInterval(()=>{ hbCount++; if (hbCount % 6 === 0) { console.log('[diagnostic] heartbeat 60s elapsed'); } }, 10_000).unref();
+const metrics = { startTime: Date.now(), requestsTotal: 0, streamRequests: 0, providerCalls: {}, lastRequestAt: null, lastError: null, streamsReturned: 0, tmdbToImdbLookups: 0 };
 app.use((req,res,next)=>{ metrics.requestsTotal++; metrics.lastRequestAt = Date.now(); next(); });
 app.use(express.static(path.join(process.cwd(),'public')));
-
 app.get('/api/config', (req,res) => {
   const fs = require('fs');
   let override = {};
@@ -177,170 +149,78 @@ app.get('/api/config', (req,res) => {
 });
 app.post('/api/config', (req,res) => {
   const patch = req.body || {};
-  if (patch.port) {
-    const p = Number(patch.port); if (!Number.isFinite(p) || p<=0 || p>65535) return res.status(400).json({ success:false, error:'INVALID_PORT'});
-    patch.port = p;
-  }
+  if (patch.port) { const p = Number(patch.port); if (!Number.isFinite(p) || p<=0 || p>65535) return res.status(400).json({ success:false, error:'INVALID_PORT'}); patch.port = p; }
   if (patch.defaultProviders &&!Array.isArray(patch.defaultProviders)) return res.status(400).json({ success:false, error:'DEFAULT_PROVIDERS_NOT_ARRAY'});
   const ok = saveConfigPatch(patch);
   res.json({ success: ok, merged: config });
 });
-
 app.post('/api/restart', (req,res) => {
   const sess = getSession(req);
   if(!sess) return res.status(401).json({ success:false, error:'UNAUTHORIZED' });
   res.json({ success:true, message:'RESTARTING' });
-  setTimeout(()=>{
-    try {
-      const fs = require('fs');
-      const restartMarker = require('path').join(process.cwd(), 'restart.trigger');
-      fs.writeFileSync(restartMarker, String(Date.now()));
-    } catch (e) {}
-    allowControlledExit = true;
-    realProcessExit(0);
-  }, 300);
+  setTimeout(()=>{ try { const fs = require('fs'); const restartMarker = require('path').join(process.cwd(), 'restart.trigger'); fs.writeFileSync(restartMarker, String(Date.now())); } catch (e) {} allowControlledExit = true; realProcessExit(0); }, 300);
 });
-
-app.get('/api/health', (req, res) => {
-  res.json({ ok: true, service: 'tmdb-embed-api', time: new Date().toISOString() });
-});
-
-app.get('/api/metrics', (req,res) => {
-  res.json({
-    uptimeSeconds: Math.round((Date.now()-metrics.startTime)/1000),
-    requestsTotal: metrics.requestsTotal,
-    streamRequests: metrics.streamRequests,
-    providerCalls: metrics.providerCalls,
-    streamsReturned: metrics.streamsReturned,
-    tmdbToImdbLookups: metrics.tmdbToImdbLookups,
-    lastRequestAt: metrics.lastRequestAt,
-    memoryMB: Math.round(process.memoryUsage().rss/1024/1024),
-    loadAvg: os.loadavg? os.loadavg() : [],
-    nodeVersion: process.version,
-    configDefaults: {
-      region: config.defaultRegion,
-      providers: config.defaultProviders,
-      minQualities: config.minQualities? Object.keys(config.minQualities).length : 0,
-      excludeCodecs: config.excludeCodecs? Object.keys(config.excludeCodecs).filter(k=>config.excludeCodecs[k]).length : 0,
-      febboxCookies: config.febboxCookies.length
-    }
-  });
-});
-
+app.get('/api/health', (req, res) => { res.json({ ok: true, service: 'tmdb-embed-api', time: new Date().toISOString() }); });
+app.get('/api/metrics', (req,res) => { res.json({ uptimeSeconds: Math.round((Date.now()-metrics.startTime)/1000), requestsTotal: metrics.requestsTotal, streamRequests: metrics.streamRequests, providerCalls: metrics.providerCalls, streamsReturned: metrics.streamsReturned, tmdbToImdbLookups: metrics.tmdbToImdbLookups, lastRequestAt: metrics.lastRequestAt, memoryMB: Math.round(process.memoryUsage().rss/1024/1024), loadAvg: os.loadavg? os.loadavg() : [], nodeVersion: process.version }); });
 app.get('/api/status', (req,res) => {
-  const endpoints = [
-    'GET /api/health',
-    'GET /api/metrics',
-    'GET /api/status',
-    'GET /api/providers',
-    'GET /api/providers/:name',
-    'GET /api/streams/:type/:tmdbId',
-    'GET /api/streams/:provider/:type/:tmdbId',
-    'POST /api/config',
-    'GET /api/config',
-    'GET /api/shiopa-proxy?id=TMDB_ID&type=movie' // <-- NEW
-  ];
+  const endpoints = ['GET /api/health','GET /api/metrics','GET /api/status','GET /api/providers','GET /api/shiopa-proxy?id=...'];
   const cookieRequiredProviders = new Set(['showbox']);
-  const providers = listProviders().map(p => {
-    const cookieRequired = cookieRequiredProviders.has(p.name);
-    const cookieOk =!cookieRequired || (config.febboxCookies && config.febboxCookies.length > 0);
-    return { name: p.name, enabled: p.enabled, cookieRequired, cookieOk };
-  });
-  res.json({ success:true, providerCheckTmdbId: config.providerCheckTmdbId, metrics: {
-    uptimeSeconds: Math.round((Date.now()-metrics.startTime)/1000),
-    requestsTotal: metrics.requestsTotal,
-    streamRequests: metrics.streamRequests,
-    providerCalls: metrics.providerCalls,
-    streamsReturned: metrics.streamsReturned,
-    tmdbToImdbLookups: metrics.tmdbToImdbLookups,
-    lastRequestAt: metrics.lastRequestAt,
-    memoryMB: Math.round(process.memoryUsage().rss/1024/1024)
-  }, endpoints, providers });
+  const providers = listProviders().map(p => { const cookieRequired = cookieRequiredProviders.has(p.name); const cookieOk =!cookieRequired || (config.febboxCookies && config.febboxCookies.length > 0); return { name: p.name, enabled: p.enabled, cookieRequired, cookieOk }; });
+  res.json({ success:true, endpoints, providers });
 });
-
-app.get('/api/providers', (req,res) => {
-  res.json({ success: true, providers: listProviders() });
-});
-
-app.get('/api/debug/env', (req,res) => {
-  const cookieStats = getCookieStats? getCookieStats() : null;
-  res.json({
-    port: config.port,
-    defaultProviders: config.defaultProviders,
-    febboxCookieCount: config.febboxCookies.length,
-    showboxCacheDir: process.env.SHOWBOX_CACHE_DIR || '(os tmp)',
-    nodeVersion: process.version,
-    cookieStats
-  });
-});
-
-app.get('/api/providers/:name', (req,res) => {
-  const p = getProvider(req.params.name);
-  if (!p) return res.status(404).json({ success:false, error:'PROVIDER_NOT_FOUND' });
-  res.json({ success:true, provider:{ name: p.name, enabled: p.enabled } });
-});
+app.get('/api/providers', (req,res) => { res.json({ success: true, providers: listProviders() }); });
+app.get('/api/debug/env', (req,res) => { const cookieStats = getCookieStats? getCookieStats() : null; res.json({ port: config.port, defaultProviders: config.defaultProviders, febboxCookieCount: config.febboxCookies.length, nodeVersion: process.version, cookieStats }); });
+app.get('/api/providers/:name', (req,res) => { const p = getProvider(req.params.name); if (!p) return res.status(404).json({ success:false, error:'PROVIDER_NOT_FOUND' }); res.json({ success:true, provider:{ name: p.name, enabled: p.enabled } }); });
 
 // ============================================
-// SHIOPA PROXY - NEW ADDED
+// SHIOPA PROXY - PUPPETEER FINAL VERSION
 // ============================================
 app.get('/api/shiopa-proxy', async (req, res) => {
   const { id, type = 'movie', season = '1', episode = '1' } = req.query;
-  if (!id) return res.status(400).json({ error: 'id required? id=299536&type=movie' });
+  if (!id) return res.status(400).json({ error: 'id required' });
 
+  let browser = null;
   try {
-    // Step 1: Get buildId from homepage
-    const homeRes = await fetch('https://shiopa.com/', {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
-    });
-    const homeHtml = await homeRes.text();
-    const buildIdMatch = homeHtml.match(/"buildId":"([^"]+)"/);
-    const buildId = buildIdMatch? buildIdMatch[1] : 'dcc50bbdd1f48c8c';
-
-    // Step 2: Call Next.js data API which contains the signed /watch/t/ link
-    const dataUrl = `https://shiopa.com/_next/data/${buildId}/watch/${type}/${id}${type === 'tv'? `/${season}/${episode}` : ''}.json`;
-
-    const dataRes = await fetch(dataUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0',
-        'Referer': 'https://shiopa.com/'
-      }
+    browser = await puppeteer.launch({
+      args: chromium.args,
+      defaultViewport: chromium.defaultViewport,
+      executablePath: await chromium.executablePath(),
+      headless: chromium.headless,
     });
 
-    const text = await dataRes.text();
+    const page = await browser.newPage();
+    const target = type === 'movie'
+     ? `https://shiopa.com/watch/movie/${id}`
+      : `https://shiopa.com/watch/tv/${id}/${season}/${episode}`;
 
-    // Find /watch/t/ token
-    const tokenMatch = text.match(/\/watch\/t\/[A-Za-z0-9_\-\/]+/);
+    await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-    if (tokenMatch) {
-      let finalUrl = 'https://shiopa.com' + tokenMatch[0].replace(/\\/g, '');
-      // If token has second part with \, fix it
-      const secondPartMatch = text.match(/"t":"([^"]+)"/);
-      if (secondPartMatch &&!finalUrl.includes(secondPartMatch[1].substring(0,10))) {
-         // Sometimes token is split, try to reconstruct from pageProps
-      }
+    // Wait for token generation - Shiopa takes 3-5 sec
+    await new Promise(r => setTimeout(r, 7000));
+
+    let finalUrl = page.url();
+
+    // If still not /watch/t/, extract from HTML
+    if (!finalUrl.includes('/watch/t/')) {
+      const html = await page.content();
+      const m = html.match(/\/watch\/t\/[A-Za-z0-9_\-]+\/[^\s"'\\]+/);
+      if (m) finalUrl = 'https://shiopa.com' + m[0];
+    }
+
+    await browser.close();
+
+    if (finalUrl.includes('/watch/t/')) {
       return res.redirect(finalUrl);
+    } else {
+      return res.status(404).json({ error: 'shiopa token not found after puppeteer', finalUrl });
     }
-
-    // Fallback: try direct page scrape
-    const pageRes = await fetch(`https://shiopa.com/watch/${type}/${id}${type==='tv'?`/${season}/${episode}`:''}`, {
-      headers: { 'User-Agent': 'Mozilla/5.0' }
-    });
-    const pageHtml = await pageRes.text();
-    const pageMatch = pageHtml.match(/\/watch\/t\/[A-Za-z0-9_\-]+\/[A-Za-z0-9_\-=%]+/);
-    if (pageMatch) {
-      return res.redirect('https://shiopa.com' + pageMatch[0]);
-    }
-
-    return res.status(404).json({ error: 'shiopa token not found', dataUrl });
 
   } catch (e) {
+    if (browser) await browser.close();
     console.error('[shiopa-proxy] error', e.message);
     return res.status(500).json({ error: e.message });
   }
 });
-// ============================================
-// END SHIOPA PROXY
-// ============================================
 
 app.get('/api/streams/:type/:tmdbId', async (req,res) => {
   const { type, tmdbId } = req.params;
@@ -352,20 +232,11 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
     const tmdbType = type === 'movie'? 'movie' : 'tv';
     const imdbId = await resolveImdbId(tmdbType, tmdbId); if (imdbId) metrics.tmdbToImdbLookups++;
     const selectedProviders = (config.defaultProviders.length? config.defaultProviders : listProviders().map(p=>p.name));
-    const providerTimings = {};
     const results = await Promise.all(selectedProviders.map(async name => {
       const prov = getProvider(name);
       if (!prov ||!prov.enabled) return [];
       metrics.providerCalls[name] = (metrics.providerCalls[name]||0)+1;
-      try {
-        const t0 = Date.now();
-        const r = await prov.fetch({ tmdbId, type, season, episode, imdbId, filters:{ } });
-        providerTimings[name] = Date.now()-t0;
-        return r;
-      } catch (e) {
-        providerTimings[name] = null;
-        return [];
-      }
+      try { return await prov.fetch({ tmdbId, type, season, episode, imdbId, filters:{ } }); } catch (e) { return []; }
     }));
     let streams = results.flat();
     streams = applyFilters(streams, 'aggregate', config.minQualities, config.excludeCodecs);
@@ -375,11 +246,8 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
       streams = processStreamsForProxy(streams, serverUrl);
       streams = streams.map(s => { if (s && typeof s === 'object') { const { headers,...rest } = s; return rest; } return s; });
     }
-    res.json({ success:true, tmdbId, imdbId, count: streams.length, providerTimings, streams });
-  } catch (e) {
-    metrics.lastError = e.message;
-    res.status(500).json({ success:false, error:'INTERNAL_ERROR', message:e.message });
-  }
+    res.json({ success:true, tmdbId, imdbId, count: streams.length, streams });
+  } catch (e) { res.status(500).json({ success:false, error:'INTERNAL_ERROR', message:e.message }); }
 });
 
 app.get('/api/streams/:provider/:type/:tmdbId', async (req,res) => {
@@ -395,9 +263,7 @@ app.get('/api/streams/:provider/:type/:tmdbId', async (req,res) => {
     metrics.providerCalls[prov.name] = (metrics.providerCalls[prov.name]||0)+1;
     const tmdbType = type === 'movie'? 'movie' : 'tv';
     const imdbId = await resolveImdbId(tmdbType, tmdbId); if (imdbId) metrics.tmdbToImdbLookups++;
-    const t0 = Date.now();
     let streams = await prov.fetch({ tmdbId, type, season, episode, imdbId, filters:{} });
-    const providerTimings = { [prov.name]: Date.now()-t0 };
     streams = applyFilters(streams, prov.name, config.minQualities, config.excludeCodecs);
     metrics.streamsReturned += streams.length;
     if (config.enableProxy) {
@@ -405,17 +271,13 @@ app.get('/api/streams/:provider/:type/:tmdbId', async (req,res) => {
       streams = processStreamsForProxy(streams, serverUrl);
       streams = streams.map(s => { if (s && typeof s === 'object') { const { headers,...rest } = s; return rest; } return s; });
     }
-    res.json({ success:true, provider: prov.name, tmdbId, imdbId, count: streams.length, providerTimings, streams });
-  } catch (e) {
-    metrics.lastError = e.message;
-    res.status(500).json({ success:false, error:'INTERNAL_ERROR', message:e.message });
-  }
+    res.json({ success:true, provider: prov.name, tmdbId, imdbId, count: streams.length, streams });
+  } catch (e) { res.status(500).json({ success:false, error:'INTERNAL_ERROR', message:e.message }); }
 });
 
 const PORT = process.env.PORT || config.port || 8787;
 const HOST = process.env.BIND_HOST || '0.0.0.0';
 const server = app.listen(PORT, HOST, () => {
-  console.log(`TMDB Embed REST API listening on http://${HOST}:${PORT}`);
-  console.log(`Endpoints: GET /api/health, GET /api/shiopa-proxy?id=...`);
+  console.log(`TMDB Embed REST API listening on http://${HOST}:${PORT} + Shiopa Proxy Ready`);
 });
 server.on('error', (err)=>{ console.error('[diagnostic] server error', err); });
