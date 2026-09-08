@@ -6,7 +6,7 @@
   "scripts": {
     "start": "nodemon --watch restart.trigger apiServer.js",
     "start:dev": "nodemon --watch restart.trigger --ignore providers/.cache --ignore **/cache apiServer.js",
-    "lint": "eslint . --ext .js"
+    "lint": "eslint. --ext.js"
   },
   "dependencies": {
     "aromanize": "^0.1.5",
@@ -23,8 +23,7 @@
     "jsdom": "^26.1.0",
     "node-fetch": "^2.7.0",
     "p-limit": "^6.2.0",
-    "puppeteer-core": "^22.13.0",
-    "@sparticuz/chromium": "^119.0.2",
+    "puppeteer": "^22.13.0",
     "string-similarity": "^4.0.4",
     "tough-cookie": "^5.1.2",
     "ttl-cache": "^1.0.2",
