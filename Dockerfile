@@ -17,6 +17,7 @@ RUN npm ci --omit=dev 2>/dev/null || npm install --omit=dev
 RUN npx puppeteer browsers install chrome
 
 COPY apiServer.js ./
+COPY MoviMoon_61_Servers_COMBINED_FINAL.js ./
 COPY providers ./providers
 COPY proxy ./proxy
 COPY public ./public
@@ -30,6 +31,7 @@ WORKDIR /app
 
 ENV NODE_ENV=production \
     BIND_HOST=0.0.0.0 \
+    PORT=8787 \
     APP_VERSION=${VERSION} \
     PUPPETEER_CACHE_DIR=/home/app/.cache/puppeteer
 
@@ -47,6 +49,7 @@ RUN groupadd -r app && useradd -r -g app -m app && mkdir -p /home/app/.cache/pup
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /root/.cache/puppeteer /home/app/.cache/puppeteer
 COPY --from=build /app/apiServer.js ./
+COPY --from=build /app/MoviMoon_61_Servers_COMBINED_FINAL.js ./
 COPY --from=build /app/public ./public
 COPY --from=build /app/providers ./providers
 COPY --from=build /app/proxy ./proxy
@@ -59,6 +62,6 @@ RUN chown -R app:app /app
 USER app
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
-    CMD wget -qO- http://localhost:${PORT}/api/health || exit 1
+    CMD wget -qO- http://localhost:8787/api/health || exit 1
 
 CMD ["node","apiServer.js"]
